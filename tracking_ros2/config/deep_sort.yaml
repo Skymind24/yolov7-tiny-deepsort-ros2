@@ -1,0 +1,19 @@
+tracker: 
+  ros__parameters: 
+    max_dist: 0.2
+    min_confidence: 0.3
+    nms_max_overlap: 0.5
+    max_iou_distance: 0.7
+    max_age: 70
+    n_init: 3
+    nn_budget: 100
+    distance: "cosine"
+    reid_ckpt: "/home/nvidia/yolov7_ros2_ws/src/tracking_ros2/tracking_ros2/deep_sort/deep/checkpoint/osnet_ain_x1_0_imagenet.pth"
+    classes: "/home/nvidia/yolov7_ros2_ws/src/tracking_ros2/config/classes.txt"
+    camera_fov: 60
+    save_path: "/home/nvidia/Documents/deepsort_results"
+    frame_interval: 1
+    save_results: True
+    img_topic: "/image_raw"
+    bbox_topic: "/yolo_detection/detector/bounding_boxes"
+    
