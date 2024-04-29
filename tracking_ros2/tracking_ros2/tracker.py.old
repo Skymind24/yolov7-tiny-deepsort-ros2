@@ -17,7 +17,7 @@ from sensor_msgs.msg import Image, CompressedImage
 from ankle_band_tracking_interfaces.msg import BoundingBox, BoundingBoxArray
 from ankle_band_tracking_interfaces.srv import ChooseTarget, ClearTarget
 
-from .deep_sort import build_tracker
+from deep_sort_realtime.deepsort_tracker import DeepSort
 from .utils.draw import draw_boxes
 
 class Tracker(Node):
@@ -26,17 +26,6 @@ class Tracker(Node):
         super().__init__('tracker')
 
         # Declare params 
-        # Deepsort params
-        self.declare_parameter('max_dist', 0.2)
-        self.declare_parameter('min_confidence', 0.3)
-        self.declare_parameter('nms_max_overlap', 0.5)
-        self.declare_parameter('max_iou_distance', 0.7)
-        self.declare_parameter('max_age', 70)
-        self.declare_parameter('n_init', 3)
-        self.declare_parameter('nn_budget', 100)
-        self.declare_parameter('distance', 'cosine')
-        self.declare_parameter('reid_ckpt', '')
-
         # Detector params
         self.declare_parameter('classes', '')
 
@@ -51,27 +40,14 @@ class Tracker(Node):
         self.declare_parameter('bbox_topic', '/yolo_detection/detector/bounding_boxes')
         
         # Get params
-        reid_ckpt = self.get_parameter('reid_ckpt').get_parameter_value().string_value
         classes_path = self.get_parameter('classes').get_parameter_value().string_value
         with open(classes_path, 'r', encoding='utf8') as fp:
             self.class_names = [line.strip() for line in fp.readlines()]
         
         save_path = self.get_parameter('save_path').get_parameter_value().string_value
         
-        if not reid_ckpt or not save_path:
+        if not save_path:
             raise Exception("Invalid or empty paths provided in YAML file.")
-            
-        deepsort_params = {
-            "MAX_DIST": self.get_parameter('max_dist').get_parameter_value().double_value,
-            "MIN_CONFIDENCE": self.get_parameter('min_confidence').get_parameter_value().double_value,
-            "NMS_MAX_OVERLAP": self.get_parameter('nms_max_overlap').get_parameter_value().double_value,
-            "MAX_IOU_DISTANCE": self.get_parameter('max_iou_distance').get_parameter_value().double_value,
-            "MAX_AGE": self.get_parameter('max_age').get_parameter_value().integer_value,
-            "N_INIT": self.get_parameter('n_init').get_parameter_value().integer_value,
-            "NN_BUDGET": self.get_parameter('nn_budget').get_parameter_value().integer_value,
-            "DISTANCE": self.get_parameter('distance').get_parameter_value().string_value,
-            "REID_CKPT": reid_ckpt
-        }
 
         args = {
             "frame_interval": self.get_parameter('frame_interval').get_parameter_value().integer_value,
@@ -105,7 +81,6 @@ class Tracker(Node):
         self.target_clear_srv = self.create_service(ClearTarget, "/yolo_detection/tracker/clear_target", self.clear_track_callback)
         self.target_choose_srv = self.create_service(ChooseTarget, "/yolo_detection/tracker/choose_target", self.choose_target_callback)
 
-        self.cfg = {"DEEPSORT": deepsort_params}
         self.args = args
 
         self.logger = self.get_logger()
@@ -114,7 +89,8 @@ class Tracker(Node):
         if not use_cuda:
             warnings.warn("Running in cpu mode which maybe very slow!", UserWarning)
 
-        self.deepsort = build_tracker(self.cfg, use_cuda=use_cuda)
+        # Build tracker
+        self.deepsort = DeepSort(max_age=50)
 
         self.idx_frame = 0
         self.idx_tracked = None
@@ -158,7 +134,7 @@ class Tracker(Node):
         if msg:
             self.img_msg = msg
 
-    #main deepsort callback function
+    # Main deepsort callback function
     def ros_deepsort_callback(self, msg):
         
         start = time.time()
@@ -166,19 +142,17 @@ class Tracker(Node):
         if self.img_msg == None:
             return
 
-        #convert ros Image message to opencv
+        # Convert ros Image message to opencv
         ori_im = self.cv_bridge.imgmsg_to_cv2(self.img_msg, "bgr8")  
         im = cv2.cvtColor(ori_im, cv2.COLOR_BGR2RGB)
 
-        #skip frame per frame interval
+        # Skip frame per frame interval
         self.idx_frame += 1
         if self.idx_frame % self.args["frame_interval"]:
             return
             
-        # parse ros message
-        bbox_xywh = []
-        cls_conf = []
-        cls_ids = []
+        # Parse ros message
+        results = []
         for bounding_box in msg.bounding_boxes:
             x = bounding_box.xmin
             y = bounding_box.ymin
@@ -190,23 +164,21 @@ class Tracker(Node):
             bbox_size_x = float(w)
             bbox_size_y = float(h)
 
-            bbox_xywh.append([bbox_center_x, bbox_center_y, bbox_size_x, bbox_size_y])
-            cls_conf.append(bounding_box.conf)
-            cls_ids.append(bounding_box.class_idx)
+            results.append([[x, y, w, h], bounding_box.conf, bounding_box.class_idx])
 
-        bbox_xywh = np.array(bbox_xywh)
-        cls_conf = np.array(cls_conf)
-        cls_ids = np.array(cls_ids)
-        
-        # Select target class
-        mask = cls_ids==0
-        cls_conf = cls_conf[mask]
-        bbox_xywh = bbox_xywh[mask]
-        # Bbox dilation just in case bbox too small, delete this line if using a better pedestrian detector
-        bbox_xywh[:,3:] *= 1.2 
-        
         # Do tracking
-        outputs = self.deepsort.update(bbox_xywh, cls_conf, im, tracking_target=self.idx_tracked)
+        tracks = self.deepsort.update_tracks(results, im)
+        # output bbox identities
+        outputs = []
+        for track in tracks:
+            if not track.is_confirmed() or track.time_since_update > 1:
+                continue
+            box = track.to_tlwh()
+            x1,y1,x2,y2 = self._tlwh_to_xyxy(box)
+            track_id = track.track_id
+            outputs.append(np.array([x1,y1,x2,y2,track_id], dtype=np.int))
+        if len(outputs) > 0:
+            outputs = np.stack(outputs,axis=0)
 
         # If detection present draw bounding boxes
         if len(outputs) > 0:
@@ -217,7 +189,7 @@ class Tracker(Node):
             ori_im = draw_boxes(ori_im, self.bbox_xyxy, self.identities)
 
             for bb_xyxy in self.bbox_xyxy:
-                bbox_tlwh.append(self.deepsort._xyxy_to_tlwh(bb_xyxy))
+                bbox_tlwh.append(self._xyxy_to_tlwh(bb_xyxy))
 
         end = time.time()
 
@@ -266,7 +238,7 @@ class Tracker(Node):
 
         # Logging
         self.logger.info("frame: {}, time: {:.03f}s, fps: {:.03f}, detection numbers: {}, tracking numbers: {}" \
-                        .format(self.idx_frame, end-start, 1/(end-start), bbox_xywh.shape[0], len(outputs)))
+                        .format(self.idx_frame, end-start, 1/(end-start), len(bbox_xywh), len(outputs)))
     
         """publishing to topics"""
         # Publish detection identities
@@ -296,6 +268,24 @@ class Tracker(Node):
         else:
             self.target_indice_pub.publish(Int32(data=-1))
             self.bbox_pub.publish(Point(x=0.0, y=0.0, z=0.0))
+
+
+    def _tlwh_to_xyxy(self, bbox_tlwh):
+        x,y,w,h = bbox_tlwh
+        x1 = max(int(x),0)
+        x2 = min(int(x+w),self.width-1)
+        y1 = max(int(y),0)
+        y2 = min(int(y+h),self.height-1)
+        return x1,y1,x2,y2
+    
+    def _xyxy_to_tlwh(self, bbox_xyxy):
+        x1,y1,x2,y2 = bbox_xyxy
+
+        t = x1
+        l = y1
+        w = int(x2-x1)
+        h = int(y2-y1)
+        return t,l,w,h
 
 
 def main(args=None):

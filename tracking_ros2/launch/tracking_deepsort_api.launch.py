@@ -16,7 +16,6 @@ def generate_launch_description():
 
     tracking_ros2_share_dir = get_package_share_directory(package_name)
     yolo_param_file = os.path.join(tracking_ros2_share_dir, 'config', 'yolov7-tiny-custom.yaml')
-    deepsort_param_file = os.path.join(tracking_ros2_share_dir, 'config', 'deep_sort.yaml')
 
     ### Lanch File ###
 
@@ -50,8 +49,7 @@ def generate_launch_description():
             ('/image_raw', 'image_raw'),
             ('/yolo_detection/detector/bounding_boxes', 'yolo_detection/detector/bounding_boxes'),
         ],
-        output='screen',
-        parameters=[deepsort_param_file]
+        output='screen'
     )
 
 

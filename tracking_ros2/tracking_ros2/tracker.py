@@ -18,8 +18,6 @@ from ankle_band_tracking_interfaces.msg import BoundingBox, BoundingBoxArray
 from ankle_band_tracking_interfaces.srv import ChooseTarget, ClearTarget
 
 from .deep_sort import build_tracker
-
-from deep_sort_realtime.deepsort_tracker import DeepSort
 from .utils.draw import draw_boxes
 
 class Tracker(Node):
@@ -116,8 +114,8 @@ class Tracker(Node):
         if not use_cuda:
             warnings.warn("Running in cpu mode which maybe very slow!", UserWarning)
 
-        # self.deepsort = build_tracker(self.cfg, use_cuda=use_cuda)
-        self.deepsort = DeepSort(max_age=50)
+        # Build tracker
+        self.deepsort = build_tracker(self.cfg, use_cuda=use_cuda)
 
         self.idx_frame = 0
         self.idx_tracked = None
@@ -161,7 +159,7 @@ class Tracker(Node):
         if msg:
             self.img_msg = msg
 
-    #main deepsort callback function
+    # Main deepsort callback function
     def ros_deepsort_callback(self, msg):
         
         start = time.time()
@@ -169,20 +167,19 @@ class Tracker(Node):
         if self.img_msg == None:
             return
 
-        #convert ros Image message to opencv
+        # Convert ros Image message to opencv
         ori_im = self.cv_bridge.imgmsg_to_cv2(self.img_msg, "bgr8")  
         im = cv2.cvtColor(ori_im, cv2.COLOR_BGR2RGB)
 
-        #skip frame per frame interval
+        # Skip frame per frame interval
         self.idx_frame += 1
         if self.idx_frame % self.args["frame_interval"]:
             return
             
-        # parse ros message
+        # Parse ros message
         bbox_xywh = []
         cls_conf = []
         cls_ids = []
-        results = []
         for bounding_box in msg.bounding_boxes:
             x = bounding_box.xmin
             y = bounding_box.ymin
@@ -198,45 +195,19 @@ class Tracker(Node):
             cls_conf.append(bounding_box.conf)
             cls_ids.append(bounding_box.class_idx)
 
-            results.append([[x, y, w, h], bounding_box.conf, bounding_box.class_idx])
-
-        # bbox_xywh = np.array(bbox_xywh)
-        # cls_conf = np.array(cls_conf)
-        # cls_ids = np.array(cls_ids)
+        bbox_xywh = np.array(bbox_xywh)
+        cls_conf = np.array(cls_conf)
+        cls_ids = np.array(cls_ids)
         
         # Select target class
-        # mask = cls_ids==0
-        # cls_conf = cls_conf[mask]
-        # bbox_xywh = bbox_xywh[mask]
-        # # Bbox dilation just in case bbox too small, delete this line if using a better pedestrian detector
-        # bbox_xywh[:,3:] *= 1.2 
+        mask = cls_ids==0
+        cls_conf = cls_conf[mask]
+        bbox_xywh = bbox_xywh[mask]
+        # Bbox dilation just in case bbox too small, delete this line if using a better pedestrian detector
+        bbox_xywh[:,3:] *= 1.2 
         
         # Do tracking
-        ###outputs = self.deepsort.update(bbox_xywh, cls_conf, im, tracking_target=self.idx_tracked)
-        # output bbox identities
-        # outputs = []
-        # for track in self.tracker.tracks:
-        #     if not track.is_confirmed() or track.time_since_update > 1:
-        #         continue
-        #     box = track.to_tlwh()
-        #     x1,y1,x2,y2 = self._tlwh_to_xyxy(box)
-        #     track_id = track.track_id
-        #     outputs.append(np.array([x1,y1,x2,y2,track_id], dtype=np.int))
-        # if len(outputs) > 0:
-        #     outputs = np.stack(outputs,axis=0)
-        # return outputs
-        tracks = self.deepsort.update_tracks(results, im)
-        # output bbox identities
-        outputs = []
-        for track in tracks:
-            if not track.is_confirmed() or track.time_since_update > 1:
-                continue
-            box = track.to_tlwh()
-            x1,y1,x2,y2 = self._tlwh_to_xyxy(box)
-            track_id = track.track_id
-            outputs.append(np.array([x1,y1,x2,y2,track_id], dtype=np.int))
-        if len(outputs) > 0:
-            outputs = np.stack(outputs,axis=0)
+        outputs = self.deepsort.update(bbox_xywh, cls_conf, im, tracking_target=self.idx_tracked)
 
         # If detection present draw bounding boxes
         if len(outputs) > 0:
@@ -247,7 +218,7 @@ class Tracker(Node):
             ori_im = draw_boxes(ori_im, self.bbox_xyxy, self.identities)
 
             for bb_xyxy in self.bbox_xyxy:
-                bbox_tlwh.append(self._xyxy_to_tlwh(bb_xyxy))
+                bbox_tlwh.append(self.deepsort._xyxy_to_tlwh(bb_xyxy))
 
         end = time.time()
 
@@ -296,7 +267,7 @@ class Tracker(Node):
 
         # Logging
         self.logger.info("frame: {}, time: {:.03f}s, fps: {:.03f}, detection numbers: {}, tracking numbers: {}" \
-                        .format(self.idx_frame, end-start, 1/(end-start), len(bbox_xywh), len(outputs)))
+                        .format(self.idx_frame, end-start, 1/(end-start), bbox_xywh.shape[0], len(outputs)))
     
         """publishing to topics"""
         # Publish detection identities
@@ -326,24 +297,6 @@ class Tracker(Node):
         else:
             self.target_indice_pub.publish(Int32(data=-1))
             self.bbox_pub.publish(Point(x=0.0, y=0.0, z=0.0))
-
-
-    def _tlwh_to_xyxy(self, bbox_tlwh):
-        x,y,w,h = bbox_tlwh
-        x1 = max(int(x),0)
-        x2 = min(int(x+w),self.width-1)
-        y1 = max(int(y),0)
-        y2 = min(int(y+h),self.height-1)
-        return x1,y1,x2,y2
-    
-    def _xyxy_to_tlwh(self, bbox_xyxy):
-        x1,y1,x2,y2 = bbox_xyxy
-
-        t = x1
-        l = y1
-        w = int(x2-x1)
-        h = int(y2-y1)
-        return t,l,w,h
 
 
 def main(args=None):
